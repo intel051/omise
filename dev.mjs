@@ -1,7 +1,7 @@
 import http from 'node:http';
 import {readFile} from 'node:fs/promises';
 import handler from './api/search.js';
-const files={'/':['public/index.html','text/html'],'/app.js':['public/app.js','text/javascript'],'/style.css':['public/style.css','text/css'],'/privacy.html':['public/privacy.html','text/html']};
+const files={'/':['public/index.html','text/html'],'/app.js':['public/app.js','text/javascript'],'/stream.js':['public/stream.js','text/javascript'],'/style.css':['public/style.css','text/css'],'/privacy.html':['public/privacy.html','text/html']};
 http.createServer(async(req,res)=>{
   res.status=n=>{res.statusCode=n;return res;};res.json=x=>{res.setHeader('Content-Type','application/json; charset=utf-8');res.end(JSON.stringify(x));};
   if(req.url==='/api/search'){
