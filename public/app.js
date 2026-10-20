@@ -1,44 +1,96 @@
-import {readEvents} from './stream.js';
+import {initialState,loadState,saveState,addTrip,toggleBookmark,updateBookmark,directionsURL} from './state.js';
+import {DiningMap} from './maps.js';
 const $=s=>document.querySelector(s),reduced=matchMedia('(prefers-reduced-motion: reduce)');
-const node=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;};
-function link(text,url){try{if(new URL(url).protocol!=='https:')return node('span',text);}catch{return node('span',text);}const a=node('a',text);a.href=url;a.target='_blank';a.rel='noopener noreferrer';return a;}
-let controller=null,restaurants=[],elements=new Map();
-document.querySelectorAll('[data-city]').forEach(b=>b.onclick=()=>{$('#city').value=b.dataset.city;$('#food').focus();});
+const paths={search:'m21 21-5-5 M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0',pin:'M20 10c0 6-8 11-8 11S4 16 4 10a8 8 0 1 1 16 0Z M15 10a3 3 0 1 1-6 0 3 3 0 0 1 6 0',bookmark:'M6 3h12v18l-6-4-6 4Z',map:'m3 5 6-2 6 2 6-2v16l-6 2-6-2-6 2Z M9 3v16 M15 5v16',list:'M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01',check:'m5 12 4 4L19 6',x:'m6 6 12 12 M6 18 18 6',plus:'M12 5v14 M5 12h14',key:'M15 7a5 5 0 1 1-3 9L4 22H1v-3l7-7a5 5 0 0 1 7-5Z M16 10h.01',spark:'m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z',bowl:'M3 11h18c0 5-4 8-9 8s-9-3-9-8Z M8 22h8 M8 3v4 M12 2v5 M16 3v4',compass:'M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0 M16 8l-3 5-5 3 3-5Z',device:'M7 2h10v20H7Z M10 18h4',arrow:'m13 5 7 7-7 7 M20 12H4',note:'M4 3h16v18H4Z M8 8h8 M8 12h8 M8 16h5'};
+function node(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
+function icon(name){const span=node('span');span.dataset.icon=name;const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');const path=document.createElementNS(svg.namespaceURI,'path');path.setAttribute('d',paths[name]||paths.pin);svg.append(path);span.append(svg);return span;}
+function installIcons(root=document){root.querySelectorAll('[data-icon]:empty').forEach(el=>el.replaceWith(icon(el.dataset.icon)));}
+function anchor(label,url,cls){let u;try{u=new URL(url);if(u.protocol!=='https:')throw Error();}catch{return node('span',label,cls);}const a=node('a',label,cls);a.href=u.href;a.target='_blank';a.rel='noopener noreferrer';return a;}
+function action(label,name,fn,cls='button secondary'){const b=node('button',undefined,cls);b.type='button';b.append(icon(name),node('span',label));b.onclick=fn;return b;}
+let storage;try{storage=window.localStorage;}catch{}
+const loaded=storage?loadState(storage):{state:initialState(),error:'현재 브라우저에서 저장공간을 사용할 수 없어요.'};let state=loaded.state;
+let route='explore',view='list',searchResults=[],token=null,password='',busy=false,selected=null,saveTarget=null,noteTarget=null;
+let searchController,hydrateController,aiController,requestId=0;
+const placeCache=new Map(),photoCache=new Map();let config={mapsBrowserKey:'',aiEnabled:false},toastTimer;
+const map=new DiningMap($('#map-canvas'),id=>selectPlace(id,true));let mapStarted=false;
+function toast(message){$('#toast').textContent=message;$('#toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').hidden=true,3400);}
+function notice(message){$('#notice').textContent=message;$('#notice').hidden=!message;}
+function persist(next){try{if(!storage)throw Error();saveState(storage,next);state=next;syncTripPickers();updateCounts();return true;}catch{toast('저장하지 못했어요. 브라우저 저장공간을 확인해 주세요.');return false;}}
+function updateCounts(){document.querySelectorAll('.saved-total').forEach(el=>el.textContent=String(state.bookmarks.length));}
+function syncTripPickers(){for(const id of ['trip-filter','save-trip']){const select=$('#'+id);select.replaceChildren();state.trips.forEach(t=>{const o=node('option',t.name);o.value=t.id;select.append(o);});select.value=state.selectedTrip;}}
+async function request(path,body,{signal,timeout=20000}={}){
+ const r=await fetch('/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','x-app-password':password},body:JSON.stringify(body),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(timeout)]):AbortSignal.timeout(timeout)});
+ let data;try{data=await r.json();}catch{throw Error('응답을 읽지 못했어요. 사이트 배포 상태를 확인해 주세요.');}
+ if(!r.ok){const e=Error(data.error||'요청을 완료하지 못했어요.');e.status=r.status;throw e;}return data;
+}
+function errorMessage(e){return e.name==='TimeoutError'?'응답 시간이 초과됐어요. 다시 시도해 주세요.':e.message;}
+function handleError(e){if(e.name==='AbortError')return;notice(errorMessage(e));if(e.status===401)openDialog('settings-dialog');}
+function openDialog(id){const d=$('#'+id);if(!d.open)d.showModal();}
+document.querySelectorAll('.close-dialog').forEach(b=>b.onclick=()=>b.closest('dialog').close());
+document.querySelectorAll('dialog').forEach(d=>d.addEventListener('click',e=>{if(e.target===d){const r=d.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)d.close();}}));
+$('#settings').onclick=()=>openDialog('settings-dialog');
+$('#settings-form').onsubmit=e=>{e.preventDefault();password=$('#password').value;$('#settings-dialog').close();notice('');toast('비밀번호를 적용했어요.');if(route==='explore')$('#search').requestSubmit();else hydrateSaved();};
+function bookmarkFor(id){return state.bookmarks.find(b=>b.tripId===state.selectedTrip&&b.placeId===id);}
+function currentBookmarks(){return state.bookmarks.filter(b=>b.tripId===state.selectedTrip&&(route!=='visited'||b.visitedAt));}
+function currentPlaces(){return route==='explore'?searchResults:currentBookmarks().map(b=>placeCache.get(b.placeId)||{id:b.placeId,name:'저장한 식당',address:'정보를 다시 불러와 주세요.',unavailable:true});}
+function openSave(p){saveTarget=p;syncTripPickers();$('#save-place-name').textContent=p.name;$('#save-new-name').value='';openDialog('save-dialog');}
+$('#save-form').onsubmit=e=>{e.preventDefault();if(!saveTarget)return;let next={...state,selectedTrip:$('#save-trip').value};const newName=$('#save-new-name').value.trim();try{if(newName)next=addTrip(next,newName);const exists=next.bookmarks.some(b=>b.tripId===next.selectedTrip&&b.placeId===saveTarget.id);if(!exists)next=toggleBookmark(next,saveTarget.id);if(!persist(next))return;$('#save-dialog').close();render();toast(exists?'이 여행에 이미 저장한 식당이에요.':'여행 보관함에 담았어요.');}catch(err){toast(err.message);}};
+$('#new-trip').onclick=()=>{$('#trip-name').value='';openDialog('trip-dialog');};
+$('#trip-form').onsubmit=e=>{e.preventDefault();try{if(!persist(addTrip(state,$('#trip-name').value)))return;$('#trip-dialog').close();render();toast('새 여행을 만들었어요.');}catch(err){toast(err.message);}};
+$('#trip-filter').onchange=()=>{if(persist({...state,selectedTrip:$('#trip-filter').value})){render();hydrateSaved();}};
+$('#note-form').onsubmit=e=>{e.preventDefault();if(!noteTarget)return;if(persist(updateBookmark(state,noteTarget,{note:$('#note-text').value}))){$('#note-dialog').close();render();toast('메모를 저장했어요.');}};
+function markVisited(b){if(persist(updateBookmark(state,b.id,{visitedAt:b.visitedAt?null:Date.now()}))){render();toast(b.visitedAt?'방문 표시를 해제했어요.':'다녀온 곳에 기록했어요.');}}
+function openNote(b){noteTarget=b.id;$('#note-text').value=b.note;openDialog('note-dialog');}
+let photoObserver,photoTasks=[],activePhotos=0;
+function drainPhotos(){while(activePhotos<3&&photoTasks.length){const task=photoTasks.shift();if(!task.figure.isConnected)continue;activePhotos++;loadPhoto(task).finally(()=>{activePhotos--;drainPhotos();});}}
+async function loadPhoto({figure,p}){
+ try{let url=photoCache.get(p.photo.token);if(!url){url=(await request('photo',{token:p.photo.token},{timeout:14000})).url;photoCache.set(p.photo.token,url);}if(!figure.isConnected)return;
+  const img=node('img');img.alt=p.name+' 사진';img.decoding='async';img.onload=()=>{figure.querySelector('.photo-empty')?.remove();const credit=node('figcaption',undefined,'photo-credit');credit.append(document.createTextNode('사진 · '));p.photo.authors.forEach((a,i)=>{if(i)credit.append(document.createTextNode(', '));credit.append(a.url?anchor(a.name,a.url):document.createTextNode(a.name));});if(!p.photo.authors.length)credit.append(document.createTextNode('Google Maps'));figure.append(credit);};img.onerror=()=>{img.remove();const empty=figure.querySelector('.photo-empty');if(empty)empty.lastChild.textContent='사진을 불러오지 못했어요';};img.src=url;figure.prepend(img);
+ }catch{const empty=figure.querySelector('.photo-empty');if(empty)empty.lastChild.textContent='사진이 제공되지 않아요';}
+}
+function photoFigure(p){const f=node('figure',undefined,'card-photo');const empty=node('div',undefined,'photo-empty'),jp=node('span','ひとくち');jp.lang='ja';empty.append(jp,node('span',p.photo?'사진 불러오는 중':'사진이 제공되지 않아요'));f.append(empty);if(p.photo){f._photoPlace=p;if(photoObserver)photoObserver.observe(f);else photoTasks.push({figure:f,p});}return f;}
 function makeCard(p,i){
- const c=node('article',undefined,'card');c.style.setProperty('--i',i);c.dataset.id=p.id;
- const g=node('div',undefined,'google-block'),top=node('div',undefined,'card-top'),content=node('div');content.append(node('h3',p.name),node('p',p.address,'address'));top.append(node('span',String(i+1).padStart(2,'0'),'rank'),content);g.append(top);
- const ratings=node('div',undefined,'ratings'),attr=node('span','Google Maps','gmp');attr.setAttribute('translate','no');ratings.append(node('strong',p.rating==null?'—':`★ ${Number(p.rating).toFixed(1)}`),node('span',`리뷰 ${Number(p.reviews).toLocaleString()}개`),attr);g.append(ratings);
- for(const a of p.attributions||[]){const el=node('div',undefined,'attribution');el.append(link(a.provider||'데이터 제공자',a.providerUri));g.append(el);}const links=node('div',undefined,'links');if(p.mapsUrl)links.append(link('Google 지도에서 보기 ↗',p.mapsUrl));c.append(g,node('div',undefined,'recommendation'),links);updateRecommendation(c,p);return c;
+ const c=node('article',undefined,'card'+(p.id===selected?' selected':'')+(p.unavailable?' unavailable':''));c.dataset.id=p.id;c.style.setProperty('--i',Math.min(i,8));const photo=photoFigure(p);
+ const b=bookmarkFor(p.id),saved=state.bookmarks.some(x=>x.placeId===p.id);
+ const save=action('', 'bookmark',()=>{if(route!=='explore'&&b){if(persist(toggleBookmark(state,p.id))){render();toast('여행 보관함에서 꺼냈어요.');}}else openSave(p);},'save-button'+(saved?' saved':''));save.setAttribute('aria-label',route!=='explore'&&b?'이 여행에서 저장 해제':saved?'다른 여행에도 저장':'여행에 저장');save.title=save.getAttribute('aria-label');photo.append(save);c.append(photo);
+ const body=node('div',undefined,'card-body'),data=node('div',undefined,'google-data'),heading=node('div',undefined,'card-heading'),name=node('button',p.name,'card-name');name.type='button';name.onclick=()=>selectPlace(p.id,false);const h=node('h3');h.append(name);heading.append(h);if(p.aiRank)heading.append(node('span',`AI ${p.aiRank}`,'rank'));data.append(heading,node('p',p.address,'card-address'));
+ if(!p.unavailable){const rating=node('div',undefined,'rating-line');rating.append(node('span','★','star'),node('strong',p.rating==null?'평점 없음':Number(p.rating).toFixed(1)),node('span',`(${Number(p.reviews||0).toLocaleString()})`));if(p.openNow!==null)rating.append(node('span',p.openNow?'영업 중':'현재 영업 종료','open-badge'+(p.openNow?'':' closed')));data.append(rating);const prices={PRICE_LEVEL_FREE:'무료로 표시된 장소',PRICE_LEVEL_INEXPENSIVE:'저렴한 가격대',PRICE_LEVEL_MODERATE:'보통 가격대',PRICE_LEVEL_EXPENSIVE:'높은 가격대',PRICE_LEVEL_VERY_EXPENSIVE:'매우 높은 가격대'};if(prices[p.priceLevel])data.append(node('p',prices[p.priceLevel],'price-line'));const attr=node('span','Google Maps','gmp');attr.setAttribute('translate','no');data.append(attr);for(const a of p.attributions||[])data.append(anchor(a.provider||'데이터 제공자',a.providerUri,'attribution'));}body.append(data);
+ if(p.aiReason){const reason=node('p',undefined,'reason');reason.append(node('strong','AI가 참고한 이유'),document.createTextNode(p.aiReason));body.append(reason);}if(b?.note)body.append(node('p',b.note,'note'));
+ const actions=node('div',undefined,'card-actions'),go=anchor('길찾기',directionsURL(p),'button secondary');go.prepend(icon('arrow'));actions.append(go);if(b){const visit=action('', 'check',()=>markVisited(b),'mini-action'+(b.visitedAt?' visited':''));visit.setAttribute('aria-label',b.visitedAt?'방문 표시 해제':'다녀온 곳으로 표시');visit.title=visit.getAttribute('aria-label');visit.setAttribute('aria-pressed',String(Boolean(b.visitedAt)));const note=action('','note',()=>openNote(b),'mini-action');note.setAttribute('aria-label','식당 메모');note.title='식당 메모';actions.append(visit,note);}body.append(actions);c.append(body);return c;
 }
-function updateRecommendation(c,p,pending=false){
- const slot=c.querySelector('.recommendation');slot.replaceChildren();
- slot.append(node('p',p.aiRecommended?'AI 추천 이유':pending?'AI 추천을 준비하고 있어요':'검색 결과','reason-label'));
- slot.append(node('p',pending?'구글 별점·리뷰 수와 입력한 취향을 함께 살펴보고 있어요.':p.reason,'reason'));
- if(p.aiRecommended)c.classList.add('updated');
+function emptyState(){const saved=route!=='explore',box=node('div',undefined,'empty');box.append(icon(saved?'bookmark':'bowl'),node('h3',saved?(route==='visited'?'여행의 맛있는 기록을 남겨보세요':'이 여행에 가고 싶은 식당을 담아보세요'):'다음 한 끼는, 어디일까요?'),node('p',saved?(route==='visited'?'보관함의 체크 버튼을 누르면 다녀온 곳에 모입니다.':'탐색에서 마음에 드는 식당의 저장 버튼을 눌러주세요.'):'도시와 메뉴로 찾아보세요. 마음에 드는 곳은 여행별로 담아둘 수 있어요.'));if(saved)box.append(action('식당 찾으러 가기','search',()=>location.hash='explore','button secondary'));else box.append(node('span','A LITTLE DISCOVERY, A GOOD MEAL.','empty-label'));return box;}
+function render(){
+ photoObserver?.disconnect();photoTasks=[];if('IntersectionObserver'in window)photoObserver=new IntersectionObserver(entries=>{entries.forEach(e=>{if(e.isIntersecting){photoObserver.unobserve(e.target);photoTasks.push({figure:e.target,p:e.target._photoPlace});}});drainPhotos();},{rootMargin:'200px'});
+ const places=currentPlaces();$('#cards').replaceChildren();if(!places.length)$('#cards').append(emptyState());else places.forEach((p,i)=>$('#cards').append(makeCard(p,i)));if(!photoObserver)drainPhotos();
+ const trip=state.trips.find(t=>t.id===state.selectedTrip);$('#result-title').textContent=route==='explore'?(places.length?'발견한 식당':'다음 한 끼를 기다리며'):route==='visited'?'다녀온 곳':trip?.name||'여행 보관함';$('#result-count').textContent=places.length?`${places.length}곳`:'';$('#result-caption').textContent=route==='explore'?'FIND YOUR NEXT FAVORITE':route==='visited'?'LITTLE MOMENTS, GOOD MEMORIES':'SAVED FOR YOUR TRIP';$('#ai-sort').hidden=route!=='explore'||!token||!places.length;$('#ai-sort').disabled=busy;
+ $('#workspace').classList.toggle('map-mode',view==='map');$('#map-count').textContent=places.filter(p=>p.location).length+'곳';map.render(places,selected);updateSelection();updateCounts();
 }
-function showPlaces(items){restaurants=items;elements=new Map();$('#cards').replaceChildren();items.forEach((p,i)=>{const c=makeCard(p,i);elements.set(p.id,c);$('#cards').append(c);});$('#count').textContent=`${items.length} PLACES`;if(!items.length)$('#cards').append(node('div','검색 결과가 없어요. 동네나 메뉴를 바꿔보세요.','empty small'));}
-function stage(name){const stages=['search','ranking'];document.querySelectorAll('[data-step]').forEach(el=>{el.classList.toggle('active',el.dataset.step===name);el.classList.toggle('completed',name==='done'||stages.indexOf(el.dataset.step)<stages.indexOf(name));});}
-$('#cancel').onclick=()=>controller?.abort();
-$('#search').addEventListener('submit',async e=>{
- e.preventDefault();if(controller)return;controller=new AbortController();const current=controller;let completed=false,serverError=false;const started=performance.now();
- restaurants=[];elements.clear();$('#submit').disabled=true;$('#cancel').hidden=false;$('#progress').hidden=false;$('#status').className='';$('#status').textContent='동네에서 식당을 찾고 있어요…';$('#result-title').textContent='새로운 한 끼를 찾는 중';$('#count').textContent='SEARCHING';stage('search');
- for(const id of ['cards','warnings'])$('#'+id).replaceChildren();for(let i=0;i<3;i++){const n=node('div',undefined,'skeleton');n.setAttribute('aria-hidden','true');$('#cards').append(n);}
- const tick=()=>$('#elapsed').textContent=`${Math.floor((performance.now()-started)/1000)}초`;tick();const timer=setInterval(tick,1000);const deadline=setTimeout(()=>current.abort('timeout'),45000);
- try{
-  const response=await fetch('/api/search',{method:'POST',headers:{'Content-Type':'application/json','x-app-password':$('#password').value},body:JSON.stringify(Object.fromEntries(new FormData(e.target))),signal:current.signal});
-  if(!response.ok){const data=await response.json();throw Error(data.error||'검색 요청에 실패했어요.');}
-  await readEvents(response.body,event=>{
-   if(event.type==='places'){showPlaces(event.restaurants);$('#result-title').textContent='먼저 발견한 식당';stage('ranking');$('#status').textContent='식당을 찾았어요. AI가 추천 순서와 이유를 정리하고 있어요…';for(const p of restaurants)updateRecommendation(elements.get(p.id),p,true);}
-   else if(event.type==='stage'){stage('ranking');$('#status').textContent='확인된 정보를 바탕으로 추천을 정리하고 있어요…';}
-   else if(event.type==='warning')$('#warnings').append(node('div',event.message,'notice'));
-   else if(event.type==='error'){serverError=true;throw Error(event.message);}
-   else if(event.type==='done'){
-    completed=true;restaurants=event.restaurants;const render=()=>{restaurants.forEach((p,i)=>{const c=elements.get(p.id);if(!c)return;c.querySelector('.rank').textContent=String(i+1).padStart(2,'0');updateRecommendation(c,p);c.querySelector('.rank').setAttribute('aria-label',`${event.aiRanked?'추천':'검색'} 순서 ${i+1}`);$('#cards').append(c);});};
-    if(document.startViewTransition&&!reduced.matches&&restaurants.length)document.startViewTransition(render);else render();
-    stage('done');$('#result-title').textContent=event.aiRanked?'AI 추천 순서':'발견한 식당';$('#status').textContent=event.aiRanked?'취향과 검색 정보를 참고한 AI 추천이에요.':'Google 검색 순서로 표시했어요.';
-   }
-  });if(!completed&&!serverError)throw Error('연결이 끊어졌어요. 표시된 식당은 계속 확인할 수 있어요.');
- }catch(err){for(const p of restaurants)updateRecommendation(elements.get(p.id),p);$('#status').className='error';$('#status').textContent=current.signal.aborted?(current.signal.reason==='timeout'?'응답 시간이 초과됐어요.':'분석을 중단했어요. 표시된 식당은 계속 확인할 수 있어요.'):err.message;if(!restaurants.length){$('#cards').replaceChildren(node('div','조건을 확인하고 다시 검색해 주세요.','empty small'));$('#count').textContent='0 PLACES';}$('#result-title').textContent=restaurants.length?'발견한 식당':'검색을 완료하지 못했어요.';}
- finally{if(!completed)current.abort();clearInterval(timer);clearTimeout(deadline);tick();$('#submit').disabled=false;$('#cancel').hidden=true;controller=null;document.querySelectorAll('[data-step]').forEach(el=>el.classList.remove('active'));}
-});
-
+function updateSelection(){const p=currentPlaces().find(p=>p.id===selected);const box=$('#map-selection');box.replaceChildren();box.hidden=!p;if(p){box.append(node('strong',p.name),anchor('Google 지도에서 길찾기 ↗',directionsURL(p)));}}
+function selectPlace(id,fromMap){selected=id;document.querySelectorAll('.card').forEach(c=>c.classList.toggle('selected',c.dataset.id===id));const p=currentPlaces().find(p=>p.id===id);map.focus(p);updateSelection();if(!fromMap){if(matchMedia('(max-width:1100px)').matches)setView('map');}else if(!matchMedia('(max-width:1100px)').matches){const el=[...document.querySelectorAll('.card')].find(c=>c.dataset.id===id);el?.scrollIntoView({behavior:reduced.matches?'auto':'smooth',block:'nearest'});}}
+function setView(next){view=next;$('#list-view').classList.toggle('active',next==='list');$('#map-view').classList.toggle('active',next==='map');$('#list-view').setAttribute('aria-pressed',String(next==='list'));$('#map-view').setAttribute('aria-pressed',String(next==='map'));$('#workspace').classList.toggle('map-mode',next==='map');ensureMap();}
+$('#list-view').onclick=()=>setView('list');$('#map-view').onclick=()=>setView('map');
+window.addEventListener('omise-map-error',()=>{$('#map-placeholder').hidden=false;$('#map-placeholder').replaceChildren(icon('map'),node('strong','지도를 불러오지 못했어요'),node('p','식당 카드의 길찾기는 계속 사용할 수 있어요.'));});
+async function ensureMap(){if(mapStarted)return;mapStarted=true;try{await configReady;await map.initialize(config);$('#map-placeholder').hidden=true;}catch(e){$('#map-placeholder').replaceChildren(icon('map'),node('strong','지도 대신 길찾기를 이용해 주세요'),node('p',e.message));}}
+async function hydrateSaved(){
+ if(route==='explore')return;hydrateController?.abort();const ac=new AbortController();hydrateController=ac;const ids=[...new Set(currentBookmarks().map(b=>b.placeId))];if(!ids.length){$('#status').textContent='';return;}$('#status').textContent='저장한 식당의 최신 정보를 불러오고 있어요…';
+ try{let failures=0;for(let offset=0;offset<ids.length;offset+=20){const r=await request('places',{ids:ids.slice(offset,offset+20)},{signal:ac.signal,timeout:55000});if(ac.signal.aborted)return;r.places.forEach(p=>placeCache.set(p.id,p));failures+=r.failedIds?.length||0;render();$('#status').textContent=`식당 정보 ${Math.min(offset+20,ids.length)}/${ids.length}곳 확인 중…`;}$('#status').textContent=failures?'일부 식당 정보를 불러오지 못했어요. 길찾기는 계속 사용할 수 있어요.':'사진과 영업 정보는 조회 시점 기준입니다.';}
+ catch(e){if(!ac.signal.aborted){handleError(e);$('#status').textContent='저장 내역은 유지됩니다. 잠시 후 다시 열어주세요.';}}
+}
+function navigate(){const hash=location.hash.replace('#','');route=['explore','saved','visited'].includes(hash)?hash:'explore';searchController?.abort();hydrateController?.abort();aiController?.abort();requestId++;busy=false;$('#search-submit').disabled=false;$('#status').textContent='';notice('');selected=null;document.querySelectorAll('[data-nav]').forEach(el=>{el.classList.toggle('active',el.dataset.nav===route);if(el.dataset.nav===route)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current');});$('#search-panel').hidden=route!=='explore';$('#collection-toolbar').hidden=route==='explore';$('#page-title').replaceChildren();if(route==='explore')$('#page-title').append(document.createTextNode('이번 여행의 '),node('span','맛있는 순간.'));else $('#page-title').append(document.createTextNode(route==='saved'?'가고 싶은 곳을, ': '맛있었던 순간을, '),node('span',route==='saved'?'한곳에.':'오래도록.'));$('#page-description').textContent=route==='explore'?'가고 싶은 곳을 찾고, 나만의 여행 지도에 모아보세요.':route==='saved'?'여행별로 모아둔 식당을 지도에서 확인해 보세요.':'다시 찾고 싶은 한 끼와 나만의 메모.';syncTripPickers();render();if(route!=='explore')hydrateSaved();ensureMap();}
+window.addEventListener('hashchange',navigate);
+document.querySelectorAll('[data-city]').forEach(b=>b.onclick=()=>{$('#city').value=b.dataset.city;$('#food').focus();});
+$('#search').onsubmit=async e=>{
+ e.preventDefault();if(busy)return;const id=++requestId;searchController?.abort();aiController?.abort();const ac=new AbortController();searchController=ac;busy=true;token=null;notice('');$('#search-submit').disabled=true;$('#ai-sort').hidden=true;$('#status').textContent='여행의 다음 한 끼를 찾고 있어요…';$('#cards').replaceChildren();for(let i=0;i<4;i++){const skeleton=node('div',undefined,'skeleton');skeleton.setAttribute('aria-hidden','true');$('#cards').append(skeleton);}
+ try{const data=await request('search',Object.fromEntries(new FormData(e.target)),{signal:ac.signal,timeout:18000});if(id!==requestId)return;searchResults=data.places;searchResults.forEach(p=>placeCache.set(p.id,p));token=data.recommendationToken;selected=null;render();$('#status').textContent=searchResults.length?'마음에 드는 식당을 여행 보관함에 담아보세요.':'검색 결과가 없어요. 동네나 메뉴를 바꿔보세요.';}
+ catch(err){if(id===requestId){render();handleError(err);$('#status').textContent='조건을 확인하고 다시 검색해 주세요.';}}
+ finally{if(id===requestId){busy=false;$('#search-submit').disabled=false;$('#ai-sort').disabled=false;}}
+};
+$('#ai-sort').onclick=async()=>{
+ if(busy||!token)return;const id=requestId;aiController?.abort();const ac=new AbortController();aiController=ac;busy=true;$('#ai-sort').disabled=true;$('#search-submit').disabled=true;notice('');$('#status').textContent='검색 정보를 바탕으로 후보를 정리하고 있어요…';
+ try{const data=await request('recommend',{token},{signal:ac.signal,timeout:24000});if(id!==requestId)return;const lookup=new Map(searchResults.map(p=>[p.id,p])),ranked=[];for(const row of data.recommendations||[]){const p=lookup.get(row.id);if(p){ranked.push({...p,aiReason:row.reason,aiRank:ranked.length+1});lookup.delete(row.id);}}searchResults=[...ranked,...lookup.values()];render();$('#status').textContent='AI 추천은 참고용이에요. 실제 메뉴와 가격은 방문 전에 확인해 주세요.';}
+ catch(err){if(id===requestId){handleError(err);$('#status').textContent='검색 결과는 그대로 확인할 수 있어요.';}}
+ finally{if(id===requestId){busy=false;$('#ai-sort').disabled=false;$('#search-submit').disabled=false;}}
+};
+const configReady=fetch('/api/config').then(r=>r.ok?r.json():{}).then(r=>{config={...config,...r};}).catch(()=>{});
+window.addEventListener('storage',e=>{if(e.key==='hitokuchi.trips.v1'&&storage){const loaded=loadState(storage);if(!loaded.error){state=loaded.state;syncTripPickers();render();if(route!=='explore')hydrateSaved();}}});
+installIcons();syncTripPickers();navigate();if(loaded.error)toast(loaded.error);
