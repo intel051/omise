@@ -1,0 +1,10 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {recommendWithRetry} from '../lib/pipeline.js';
+const candidates=Array.from({length:12},(_,i)=>({id:'place-'+i,name:'食堂'+i}));
+const timeout=()=>new DOMException('Timed out','TimeoutError');
+test('slow first attempt retries once with six candidates and returns partial metadata',async()=>{const calls=[];const r=await recommendWithRetry({},candidates,new AbortController().signal,async(q,places,signal,options)=>{calls.push({length:places.length,options});if(calls.length===1)throw timeout();return places.map(p=>({...p,aiRecommended:true,reason:'候補を比較'}));});assert.equal(calls.length,2);assert.equal(calls[0].length,12);assert.equal(calls[1].length,6);assert.deepEqual(calls[1].options,{timeout:12000,quick:true});assert.equal(r.partial,true);assert.equal(r.retried,true);assert.equal(r.ranked.length,6);});
+test('success uses only one Gemini request',async()=>{let calls=0;const r=await recommendWithRetry({},candidates,new AbortController().signal,async()=>{calls++;return candidates;});assert.equal(calls,1);assert.equal(r.partial,false);assert.equal(r.retried,false);});
+test('quota and permission failures are not retried',async()=>{for(const status of [400,403,404,429]){let calls=0;await assert.rejects(recommendWithRetry({},candidates,new AbortController().signal,async()=>{calls++;throw Object.assign(Error('upstream'),{upstreamStatus:status});}));assert.equal(calls,1);}});
+test('user cancellation prevents the second request',async()=>{const ac=new AbortController();let calls=0;await assert.rejects(recommendWithRetry({},candidates,ac.signal,async()=>{calls++;ac.abort();throw timeout();}));assert.equal(calls,1);});
+test('second timeout is not retried again',async()=>{let calls=0;await assert.rejects(recommendWithRetry({},candidates,new AbortController().signal,async()=>{calls++;throw timeout();}));assert.equal(calls,2);});
