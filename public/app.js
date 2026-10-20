@@ -12,11 +12,11 @@ function makeCard(p,i){
 }
 function updateDetail(c,p){
  const slot=c.querySelector('.detail-slot');slot.replaceChildren();const line=node('div',undefined,'tabelog-line');line.append(node('span','食べログ · 타베로그','tabelog-title'));
- const labels={pending:'확인 중',skipped:'이번 검색 미조회',unknown:'미확인',found:'페이지 읽기 완료'};
+ const labels={pending:'확인 중',skipped:'이번 검색 미조회',unknown:'미확인',found:'점수 확인'};
  if(p.tabelog)line.append(node('strong',p.tabelog.score.toFixed(2),'score'));
  line.append(node('span',labels[p.checkStatus]||'미확인',`badge ${p.checkStatus}`));slot.append(line);
  if(p.message||p.tabelog)slot.append(node('p',p.tabelog?`${p.tabelog.label} · 조회 ${new Date(p.tabelog.checkedAt).toLocaleTimeString('ko-KR')}`:p.message,'detail-note'));
- const links=node('div',undefined,'links');if(p.mapsUrl)links.append(link('Google 지도 ↗',p.mapsUrl));links.append(link(p.tabelog?'타베로그 원문 ↗':'타베로그 검색 ↗',p.tabelog?.url||`https://www.google.com/search?q=${encodeURIComponent(`site:tabelog.com ${p.name} ${p.address}`)}`));slot.append(links);c.classList.remove('updated');void c.offsetWidth;c.classList.add('updated');
+ const links=node('div',undefined,'links');if(p.mapsUrl)links.append(link('Google 지도 ↗',p.mapsUrl));links.append(link(p.tabelog?'타베로그 원문 ↗':p.tabelogUrl?'타베로그 후보 페이지 ↗':'타베로그 검색 ↗',p.tabelog?.url||p.tabelogUrl||`https://www.google.com/search?q=${encodeURIComponent(`site:tabelog.com ${p.name} ${p.address}`)}`));slot.append(links);c.classList.remove('updated');void c.offsetWidth;c.classList.add('updated');
 }
 function showPlaces(items){restaurants=items;elements=new Map();$('#cards').replaceChildren();items.forEach((p,i)=>{const c=makeCard(p,i);elements.set(p.id,c);$('#cards').append(c);});$('#count').textContent=`${items.length} PLACES`;if(!items.length)$('#cards').append(node('div','검색 결과가 없어요. 동네나 메뉴를 바꿔보세요.','empty small'));}
 function stage(name){const stages=['search','details','ranking'];document.querySelectorAll('[data-step]').forEach(el=>{el.classList.toggle('active',el.dataset.step===name);el.classList.toggle('completed',name==='done'||stages.indexOf(el.dataset.step)<stages.indexOf(name));});}
@@ -47,3 +47,4 @@ $('#search').addEventListener('submit',async e=>{
  }catch(err){finishPending('분석이 끝나지 않아 미확인으로 표시해요.');$('#status').className='error';$('#status').textContent=current.signal.aborted?(current.signal.reason==='timeout'?'응답 시간이 초과됐어요.':'분석을 중단했어요. 표시된 식당은 계속 확인할 수 있어요.'):err.message;if(!restaurants.length){$('#cards').replaceChildren(node('div','조건을 확인하고 다시 검색해 주세요.','empty small'));$('#count').textContent='0 PLACES';}$('#result-title').textContent=restaurants.length?'발견한 식당':'검색을 완료하지 못했어요.';}
  finally{if(!completed)current.abort();clearInterval(timer);clearTimeout(deadline);tick();$('#submit').disabled=false;$('#cancel').hidden=true;controller=null;document.querySelectorAll('[data-step]').forEach(el=>el.classList.remove('active'));}
 });
+

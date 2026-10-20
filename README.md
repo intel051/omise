@@ -26,7 +26,7 @@ ZIP을 풀고 **package.json, vercel.json, api, lib, public 등이 저장소 최
 | --- | --- | --- |
 | GOOGLE_MAPS_API_KEY | Places API (New) 서버용 키 | 필수 |
 | GEMINI_API_KEY | Google AI Studio 키 | 필수 |
-| GEMINI_MODEL | `gemini-2.5-flash` | 생략 가능 |
+| GEMINI_MODEL | `gemini-3.5-flash-lite` | 생략 가능 |
 | APP_PASSWORD | 길고 무작위인 사이트 비밀번호 | 외부 공개 시 권장 |
 
 환경변수를 나중에 추가/변경하면 Redeploy 하세요. Production/Preview에 필요한 범위를 각각 지정하세요. 검색 패널의 ‘사이트 비밀번호’를 열어 APP_PASSWORD 값을 입력합니다. 비밀번호는 메모리에만 두며 localStorage에 저장하지 않습니다. 비밀번호 미설정 시 누구나 API를 호출할 수 있습니다.
@@ -111,7 +111,7 @@ npm test
 - https://developers.google.com/maps/documentation/places/web-service/text-search
 - https://developers.google.com/maps/documentation/places/web-service/policies
 - https://ai.google.dev/gemini-api/docs/generate-content/google-search
-- https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash
+- https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite
 - https://vercel.com/docs/functions/runtimes/node-js
 - https://tabelog.com/help/rules/
 
@@ -123,3 +123,16 @@ npm test
 ## 기존 버전에서 업데이트
 
 ZIP 내용으로 GitHub 프로젝트 파일을 교체하고 Vercel에서 재배포하세요. 기존 API 키와 APP_PASSWORD는 그대로 사용할 수 있습니다. api/search.js 응답이 JSON에서 NDJSON 스트림으로 변경되었으므로 public/app.js, public/stream.js 및 서버 파일을 함께 교체해야 합니다. 프런트 파일만 교체하면 동작하지 않습니다.
+
+
+
+## 공개 HTML 조회와 블루 테마 업데이트
+
+- `lib/tabelog.js`: 일반 공개 식당 페이지에 한해 서버에서 HTML을 받아 JSON-LD의 Restaurant/LocalBusiness `aggregateRating`을 읽습니다. 리뷰 본문은 수집하지 않고 HTML의 스크립트를 실행하지 않습니다.
+- 이름·주소·페이지 URL·5점 척도·상충 점수를 검사한 뒤 표시합니다. 모든 페이지에 이 구조가 존재하는 것은 아니므로 미확인이 나올 수 있습니다. 주소 구분 기호와 일본식 丁目/番/号 표기 차이를 정규화했습니다.
+- robots.txt를 조회하고 명시한 크롤러 규칙을 따릅니다. 일반 사용자 에이전트로 위장하지 않으며, 401/403/429·로그인 리디렉션·조회 제한에는 재시도나 우회를 하지 않습니다. robots.txt 확인에 실패해도 HTML 수집을 중단합니다. robots 규칙 자체가 데이터 재사용 허가를 의미하지는 않습니다.
+- 공개 HTML 추출에 실패하면 기존 Gemini URL Context를 독립적인 보조 경로로 시도합니다. URL 검색 실패, 페이지 접근 실패, 지점/점수 미확인을 구분하고 확인되지 않은 후보 페이지 링크를 표시합니다.
+- 서버 로그 `tabelog_lookup`의 `stage`와 `status`로 `search`, `html`, `url_context` 중 실패한 단계를 확인할 수 있습니다. API 키와 페이지 본문은 로그에 출력하지 않습니다.
+- 첫 3곳 병렬 처리를 유지합니다. HTML 조회 시 최대 6.5초, robots 조회 최대 3초가 추가됩니다. HTML 확인 성공 시 Gemini 페이지 읽기 1회를 생략합니다. 식당 데이터의 장기 캐시는 추가하지 않았습니다.
+- 화면은 일본 남색과 밝은 블루, 흰 카드 중심으로 변경했고 기존 미니멀한 레이아웃과 모션 줄이기 설정을 유지합니다.
+- 검증: 모의 테스트 및 빌드를 통과했습니다. 이 환경의 실제 타베로그 표본 조회는 시간 초과되었고 브라우저 실행 파일이 없어 화면 렌더링을 확인하지 못했습니다. Vercel 운영 환경의 IP 차단 여부와 실제 수집 성공률은 배포 후 로그로 확인해야 합니다.
